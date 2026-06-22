@@ -1,0 +1,25 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude
+.claude/
+plans/
+
+# Build artifacts
+*.tar
+*.tar.gz
+
+# Secrets / local config
+*.env
+*.local
+
+# Logs
+*.log

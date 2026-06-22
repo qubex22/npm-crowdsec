@@ -1,0 +1,72 @@
+version: "3.8"
+
+services:
+  # ========================================================================
+  # CrowdSec Server — the central brain that decides which IPs to ban
+  # ========================================================================
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      GID: "${GID:-1000}"
+      # Collections to install — linux + nginx are the most useful
+      COLLECTIONS: "crowdsecurity/linux crowdsecurity/nginx"
+    volumes:
+      - crowdsec-data:/var/lib/crowdsec
+      - crowdsec-config:/etc/crowdsec
+    networks:
+      - npm-network
+    restart: unless-stopped
+
+  # ========================================================================
+  # Nginx Proxy Manager + CrowdSec Bouncer
+  # ========================================================================
+  npm:
+    image: npm-crowdsec:latest
+    container_name: npm
+    depends_on:
+      - crowdsec
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      # --- NPM Settings ---
+      # SQLite database location (default: /data/database.sqlite)
+      DB_SQLITE_FILE: "/data/database.sqlite"
+      # Timezone
+      TZ: "${TZ:-UTC}"
+      # Disable IPv6 if needed
+      # DISABLE_IPV6: "1"
+
+      # --- CrowdSec Bouncer Settings ---
+      CROWDSEC_ENABLED: "true"
+      CROWDSEC_LAPI_URL: "http://crowdsec:8080"
+      # After starting crowdsec, generate a key with:
+      #   docker exec crowdsec cscli bouncers add npm-bouncer
+      CROWDSEC_API_KEY: "CHANGE-ME-GENERATE-WITH-CSCLI"
+
+      # Optional: merge additional bouncer config keys
+      # CROWDSEC_CONFIG_CONTENT: |
+      #   MODE=stream
+      #   REQUEST_TIMEOUT=5000
+      #   EXCLUDE_LOCATION=/health,/metrics
+
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8181:81"       # NPM admin web UI (jc21 uses port 81 internally)
+    volumes:
+      - npm-data:/data
+    networks:
+      - npm-network
+    restart: unless-stopped
+
+volumes:
+  npm-data:
+  crowdsec-data:
+  crowdsec-config:
+
+networks:
+  npm-network:
+    driver: bridge
