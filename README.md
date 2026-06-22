@@ -200,11 +200,9 @@ A [GitHub Action](.github/workflows/npm-version-check.yml) runs weekly to check 
 
 ### Pulling the Image
 
-```bash
-# Login to GHCR (requires a GitHub account with read access)
-echo "<your-pat-with-read-packages>" | docker login ghcr.io -u qubex22 --password-stdin
+The image is publicly available on GHCR — no login required:
 
-# Pull the latest image
+```bash
 docker pull ghcr.io/qubex22/npm-crowdsec:latest
 ```
 
