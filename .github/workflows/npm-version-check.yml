@@ -49,10 +49,10 @@ jobs:
     name: Check NPM Version
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.version-check.outputs.should_build }}
-      npm_version: ${{ steps.version-check.outputs.npm_version }}
-      bouncer_version: ${{ steps.version-check.outputs.bouncer_version }}
-      tag: ${{ steps.version-check.outputs.tag }}
+      should_build: steps.version-check.outputs.should_build
+      npm_version: steps.version-check.outputs.npm_version
+      bouncer_version: steps.version-check.outputs.bouncer_version
+      tag: steps.version-check.outputs.tag
 
     steps:
       - name: Checkout repository
