@@ -201,7 +201,19 @@ A [GitHub Action](.github/workflows/npm-version-check.yml) runs weekly to check 
 ### Pulling the Image
 
 ```bash
+# Login to GHCR (requires a GitHub account with read access)
+echo "<your-pat-with-read-packages>" | docker login ghcr.io -u qubex22 --password-stdin
+
+# Pull the latest image
 docker pull ghcr.io/qubex22/npm-crowdsec:latest
+```
+
+Or use it directly in your compose file:
+
+```yaml
+services:
+  npm:
+    image: ghcr.io/qubex22/npm-crowdsec:latest
 ```
 
 ### Manual Dispatch
