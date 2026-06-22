@@ -19,7 +19,6 @@
 
 name: NPM Version Check & Build
 
-# Require write permissions for pushing images (Packages) and committing .npm-version (Contents)
 permissions:
   contents: write
   packages: write
@@ -42,17 +41,9 @@ env:
   IMAGE_NAME: npm-crowdsec
 
 jobs:
-  # -----------------------------------------------------------------------
-  # Job 1: Check for NPM version updates
-  # -----------------------------------------------------------------------
-  check-version:
-    name: Check NPM Version
+  check-and-build:
+    name: Check Version & Build
     runs-on: ubuntu-latest
-    outputs:
-      should_build: steps.version-check.outputs.should_build
-      npm_version: steps.version-check.outputs.npm_version
-      bouncer_version: steps.version-check.outputs.bouncer_version
-      tag: steps.version-check.outputs.tag
 
     steps:
       - name: Checkout repository
@@ -60,15 +51,18 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: Fetch latest NPM version from Docker Hub
-        id: latest
+      # ------------------------------------------------------------------
+      # Step 1: Determine if we need to build
+      # ------------------------------------------------------------------
+      - name: Check for NPM version updates
+        id: check
         run: |
-          # Query Docker Hub for the latest tag on jc21/nginx-proxy-manager
-          RESPONSE=$(curl -s "https://hub.docker.com/v2/repositories/jc21/nginx-proxy-manager/tags/?page_size=100&ordering=last_updated")
+          NPM_VERSION=""
+          BOUNCER_VERSION="${{ github.event.inputs.crowdsec_version || '1.1.3' }}"
+          FORCE="${{ github.event.inputs.force_build || 'false' }}"
 
-          # Extract the latest 'latest' tag full_size to get the digest,
-          # then get all tags and find the latest versioned tag
-          LATEST_DIGEST=$(echo "$RESPONSE" | jq -r '.results[] | select(.name == "latest") | .digest' 2>/dev/null || echo "")
+          # Fetch latest NPM version from Docker Hub
+          RESPONSE=$(curl -s "https://hub.docker.com/v2/repositories/jc21/nginx-proxy-manager/tags/?page_size=100&ordering=last_updated")
 
           # Get the latest versioned tag (e.g. 2.15.1, not 'latest')
           VERSION_TAG=$(echo "$RESPONSE" | jq -r '.results[] | select(.name | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) | .name' | sort -V | tail -1)
@@ -78,19 +72,12 @@ jobs:
             VERSION_TAG="latest"
           fi
 
-          echo "version=$VERSION_TAG" >> "$GITHUB_OUTPUT"
-          echo "digest=$LATEST_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "Latest NPM version: $VERSION_TAG (digest: ${LATEST_DIGEST:0:20}...)"
-
-      - name: Compare with last built version
-        id: version-check
-        run: |
-          NPM_VERSION="${{ steps.latest.outputs.version }}"
-          BOUNCER_VERSION="${{ github.event.inputs.crowdsec_version || '1.1.3' }}"
-          FORCE="${{ github.event.inputs.force_build || 'false' }}"
+          NPM_VERSION="$VERSION_TAG"
+          echo "Latest NPM version: $NPM_VERSION"
 
           # Read the last built version (if exists)
           LAST_NPM=""
+          LAST_BOUNCER=""
           if [ -f .npm-version ]; then
             LAST_NPM=$(grep '^npm_version=' .npm-version | cut -d'=' -f2)
             LAST_BOUNCER=$(grep '^bouncer_version=' .npm-version | cut -d'=' -f2)
@@ -119,59 +106,49 @@ jobs:
             echo "No new version available. Skipping build."
           fi
 
+          # Write outputs
           echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
           echo "npm_version=$NPM_VERSION" >> "$GITHUB_OUTPUT"
           echo "bouncer_version=$BOUNCER_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-          # Verify outputs were written
-          echo "--- Outputs ---"
-          cat "$GITHUB_OUTPUT"
-          echo "----------------"
-
-  # -----------------------------------------------------------------------
-  # Job 2: Build and push image (if new version detected)
-  # -----------------------------------------------------------------------
-  build-and-push:
-    name: Build & Push Image
-    needs: check-version
-    if: needs.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Debug — print received outputs
-        run: |
-          echo "should_build  = ${{ needs.outputs.should_build }}"
-          echo "npm_version   = ${{ needs.outputs.npm_version }}"
-          echo "bouncer_ver   = ${{ needs.outputs.bouncer_version }}"
-          echo "tag           = ${{ needs.outputs.tag }}"
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-
+      # ------------------------------------------------------------------
+      # Step 2: Set up Docker Buildx (only if building)
+      # ------------------------------------------------------------------
       - name: Set up Docker Buildx
+        if: steps.check.outputs.should_build == 'true'
         uses: docker/setup-buildx-action@v3
 
+      # ------------------------------------------------------------------
+      # Step 3: Log in to Docker Registry (only if building)
+      # ------------------------------------------------------------------
       - name: Log in to Docker Registry
+        if: steps.check.outputs.should_build == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ secrets.DOCKER_REGISTRY || 'ghcr.io' }}
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Extract metadata
+      # ------------------------------------------------------------------
+      # Step 4: Extract metadata (only if building)
+      # ------------------------------------------------------------------
+      - name: Extract Docker metadata
+        if: steps.check.outputs.should_build == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKER_REGISTRY || 'ghcr.io' }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ needs.outputs.tag }},enable=${{ needs.outputs.should_build }}
-            type=raw,value=latest,enable=${{ needs.outputs.should_build }}
-            type=raw,value=${{ needs.outputs.npm_version }}-cs${{ needs.outputs.bouncer_version }}
+            type=raw,value=${{ steps.check.outputs.tag }}
+            type=raw,value=latest
+            type=raw,value=${{ steps.check.outputs.npm_version }}-cs${{ steps.check.outputs.bouncer_version }}
 
-      - name: Build and push
+      # ------------------------------------------------------------------
+      # Step 5: Build and push (only if building)
+      # ------------------------------------------------------------------
+      - name: Build and push image
+        if: steps.check.outputs.should_build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -179,58 +156,57 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            CROWDSEC_OPENRESTY_BOUNCER_VERSION=${{ needs.outputs.bouncer_version }}
+            CROWDSEC_OPENRESTY_BOUNCER_VERSION=${{ steps.check.outputs.bouncer_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # ------------------------------------------------------------------
+      # Step 6: Update version tracker (only if built successfully)
+      # ------------------------------------------------------------------
       - name: Update version tracker
+        if: steps.check.outputs.should_build == 'true'
         run: |
           cat > .npm-version << EOF
-          npm_version=${{ needs.outputs.npm_version }}
-          bouncer_version=${{ needs.outputs.bouncer_version }}
+          npm_version=${{ steps.check.outputs.npm_version }}
+          bouncer_version=${{ steps.check.outputs.bouncer_version }}
           built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           commit=${{ github.sha }}
           EOF
 
+      # ------------------------------------------------------------------
+      # Step 7: Commit version update (only if built successfully)
+      # ------------------------------------------------------------------
       - name: Commit version update
+        if: steps.check.outputs.should_build == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           file_pattern: .npm-version
-          commit_message: "ci: update version tracker (${{ needs.outputs.npm_version }}-cs${{ needs.outputs.bouncer_version }})"
+          commit_message: "ci: update version tracker (${{ steps.check.outputs.npm_version }}-cs${{ steps.check.outputs.bouncer_version }})"
           branch: main
 
+      # ------------------------------------------------------------------
+      # Step 8: Create GitHub Release (only if built successfully)
+      # ------------------------------------------------------------------
       - name: Create GitHub Release
+        if: steps.check.outputs.should_build == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.outputs.tag }}
-          name: "npm-crowdsec ${{ needs.outputs.npm_version }} (CrowdSec ${{ needs.outputs.bouncer_version }})"
+          tag_name: ${{ steps.check.outputs.tag }}
+          name: "npm-crowdsec ${{ steps.check.outputs.npm_version }} (CrowdSec ${{ steps.check.outputs.bouncer_version }})"
           body: |
             Automatic build triggered by upstream NPM version update.
 
             | Component | Version |
             |---|---|
-            | Nginx Proxy Manager | ${{ needs.outputs.npm_version }} |
-            | CrowdSec OpenResty Bouncer | ${{ needs.outputs.bouncer_version }} |
+            | Nginx Proxy Manager | ${{ steps.check.outputs.npm_version }} |
+            | CrowdSec OpenResty Bouncer | ${{ steps.check.outputs.bouncer_version }} |
 
-            **Base image:** `jc21/nginx-proxy-manager:${{ needs.outputs.npm_version }}`
+            **Base image:** jc21/nginx-proxy-manager:${{ steps.check.outputs.npm_version }}
 
             **Pull:**
-            ```bash
-            docker pull ${{ secrets.DOCKER_REGISTRY || 'ghcr.io' }}/${{ env.IMAGE_NAME }}:${{ needs.outputs.tag }}
+            ```
+            docker pull ${{ secrets.DOCKER_REGISTRY || 'ghcr.io' }}/${{ env.IMAGE_NAME }}:${{ steps.check.outputs.tag }}
             ```
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # -----------------------------------------------------------------------
-  # Job 3: Notify on Discord/Telegram (optional — uncomment to use)
-  # -----------------------------------------------------------------------
-  # notify:
-  #   name: Notify Update
-  #   needs: [check-version, build-and-push]
-  #   if: needs.check-version.outputs.should_build == 'true' && always()
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Send notification
-  #       run: echo "Image built: ${{ needs.check-version.outputs.tag }}"
-  #       # Add your webhook here (Discord, Slack, Telegram, etc.)
