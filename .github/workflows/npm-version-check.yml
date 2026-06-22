@@ -19,6 +19,11 @@
 
 name: NPM Version Check & Build
 
+# Require write permissions for pushing images (Packages) and committing .npm-version (Contents)
+permissions:
+  contents: write
+  packages: write
+
 on:
   schedule:
     # Every Monday at 06:00 UTC
