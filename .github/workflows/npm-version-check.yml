@@ -124,16 +124,28 @@ jobs:
           echo "bouncer_version=$BOUNCER_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+          # Verify outputs were written
+          echo "--- Outputs ---"
+          cat "$GITHUB_OUTPUT"
+          echo "----------------"
+
   # -----------------------------------------------------------------------
   # Job 2: Build and push image (if new version detected)
   # -----------------------------------------------------------------------
   build-and-push:
     name: Build & Push Image
     needs: check-version
-    if: needs.outputs.should_build == 'true'
+    if: ${{ needs.outputs.should_build == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
+      - name: Debug — print received outputs
+        run: |
+          echo "should_build  = ${{ needs.outputs.should_build }}"
+          echo "npm_version   = ${{ needs.outputs.npm_version }}"
+          echo "bouncer_ver   = ${{ needs.outputs.bouncer_version }}"
+          echo "tag           = ${{ needs.outputs.tag }}"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
