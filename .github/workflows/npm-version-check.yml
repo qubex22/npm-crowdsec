@@ -8,13 +8,12 @@
 #   3. If a newer version is available, builds and pushes a new image.
 #
 # Required secrets (set in repository Settings > Secrets and variables):
-#   DOCKER_REGISTRY    — Registry URL (e.g. ghcr.io, docker.io/myuser)
-#   DOCKER_USERNAME    — Registry username
+#   DOCKER_USERNAME    — Registry username (e.g. qubex22 for GHCR)
 #   DOCKER_PASSWORD    — Registry password / access token
 #
 # The image is pushed as:
-#   <DOCKER_REGISTRY>/npm-crowdsec:<npm-version>-<bouncer-version>
-#   <DOCKER_REGISTRY>/npm-crowdsec:latest
+#   ghcr.io/qubex22/npm-crowdsec:<npm-version>-<bouncer-version>
+#   ghcr.io/qubex22/npm-crowdsec:latest
 # =============================================================================
 
 name: NPM Version Check & Build
@@ -38,7 +37,8 @@ on:
         type: string
 
 env:
-  IMAGE_NAME: npm-crowdsec
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/npm-crowdsec
 
 jobs:
   check-and-build:
@@ -122,11 +122,11 @@ jobs:
       # ------------------------------------------------------------------
       # Step 3: Log in to Docker Registry (only if building)
       # ------------------------------------------------------------------
-      - name: Log in to Docker Registry
+      - name: Log in to GHCR
         if: steps.check.outputs.should_build == 'true'
         uses: docker/login-action@v3
         with:
-          registry: ${{ secrets.DOCKER_REGISTRY || 'ghcr.io' }}
+          registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
@@ -138,7 +138,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKER_REGISTRY || 'ghcr.io' }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ steps.check.outputs.tag }}
             type=raw,value=latest
@@ -205,7 +205,7 @@ jobs:
 
             **Pull:**
             ```
-            docker pull ${{ secrets.DOCKER_REGISTRY || 'ghcr.io' }}/${{ env.IMAGE_NAME }}:${{ steps.check.outputs.tag }}
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.check.outputs.tag }}
             ```
           generate_release_notes: true
         env:

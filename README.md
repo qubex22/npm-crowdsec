@@ -194,10 +194,15 @@ A [GitHub Action](.github/workflows/npm-version-check.yml) runs weekly to check 
 
 1. Fork or clone this repository
 2. In **Settings > Secrets and variables > Actions**, add:
-   - `DOCKER_REGISTRY` — e.g. `ghcr.io` or `docker.io/youruser`
-   - `DOCKER_USERNAME` — your registry username
-   - `DOCKER_PASSWORD` — your registry password or access token
+   - `DOCKER_USERNAME` — your GitHub username (e.g. `qubex22`)
+   - `DOCKER_PASSWORD` — a [Personal Access Token](https://github.com/settings/tokens) with **`write:packages`** scope
 3. The workflow runs every Monday at 06:00 UTC, or manually via **Actions > Run workflow**
+
+### Pulling the Image
+
+```bash
+docker pull ghcr.io/qubex22/npm-crowdsec:latest
+```
 
 ### Manual Dispatch
 
