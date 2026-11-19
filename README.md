@@ -13,8 +13,9 @@ No forking — just a Dockerfile that builds on the upstream image and can be re
 |  npm-crowdsec                                     |
 |                                                    |
 |  Build-time:                                      |
-|    - lua-resty-http (via opm)                     |
 |    - CrowdSec Lua libs -> /etc/nginx/lualib/      |
+|    - lua-resty-http (vendored by bouncer >= 1.2,  |
+|      otherwise installed via opm)                 |
 |    - Response templates -> /defaults/crowdsec/    |
 |    - Default bouncer config                        |
 |                                                    |
@@ -27,7 +28,7 @@ No forking — just a Dockerfile that builds on the upstream image and can be re
                |
                v
 +--------------------------------------------------+
-|  jc21/nginx-proxy-manager:latest                  |
+|  jc21/nginx-proxy-manager:<pinned tag>            |
 |  (NPM, Node.js, OpenResty, Certbot, s6-overlay)   |
 +--------------------------------------------------+
 ```
@@ -156,9 +157,15 @@ docker compose up -d --force-recreate npm
 
 ### Updating the CrowdSec Bouncer Version
 
+The workflow tracks the newest [cs-openresty-bouncer release](https://github.com/crowdsecurity/cs-openresty-bouncer/releases) and rebuilds the image when it moves — no manual step needed.
+
+To build with a specific version locally:
+
 ```bash
-docker build --build-arg CROWDSEC_OPENRESTY_BOUNCER_VERSION=1.2.0 -t npm-crowdsec:latest .
+docker build --build-arg CROWDSEC_OPENRESTY_BOUNCER_VERSION=1.2.5 -t npm-crowdsec:latest .
 ```
+
+The `Dockerfile` default (`ARG CROWDSEC_OPENRESTY_BOUNCER_VERSION=1.2.5`) is only a fallback for plain `docker build` runs: CI always passes the detected version explicitly.
 
 ## File Layout Inside the Image
 
@@ -169,6 +176,7 @@ docker build --build-arg CROWDSEC_OPENRESTY_BOUNCER_VERSION=1.2.0 -t npm-crowdse
     +-- crowdsec.lua                    # Bouncer main module
     +-- resty/http*.lua                 # lua-resty-http dependency
     +-- plugins/crowdsec/               # Bouncer plugin modules
+        +-- resty/http*.lua             # vendored copy (bouncer >= 1.2, takes precedence)
 
 /defaults/crowdsec/                     # Build-time defaults (read-only)
 +-- crowdsec-openresty-bouncer.conf     # Default bouncer config
@@ -184,11 +192,19 @@ docker build --build-arg CROWDSEC_OPENRESTY_BOUNCER_VERSION=1.2.0 -t npm-crowdse
 
 ## GitHub Actions
 
-A [GitHub Action](.github/workflows/npm-version-check.yml) runs weekly to check for new Nginx Proxy Manager releases on Docker Hub. When a newer version is detected, it automatically:
+A [GitHub Action](.github/workflows/npm-version-check.yml) runs weekly and tracks **both** upstream components:
 
-1. Builds a new `npm-crowdsec` image
-2. Pushes it to your configured registry
-3. Creates a GitHub release with pull instructions
+| Component | Source |
+|---|---|
+| Nginx Proxy Manager | newest semver tag on Docker Hub (`jc21/nginx-proxy-manager`) |
+| CrowdSec OpenResty Bouncer | newest GitHub release (`crowdsecurity/cs-openresty-bouncer`, pre-releases excluded) |
+
+When either version differs from the last build recorded in `.npm-version`, it automatically:
+
+1. Builds a new `npm-crowdsec` image with the NPM base image **pinned** to the detected tag
+2. Pushes it to GHCR as `:<npm>-cs<bouncer>` and `:latest`
+3. Updates `.npm-version`
+4. Creates a GitHub release with pull instructions
 
 ### Setup
 
@@ -218,8 +234,8 @@ services:
 
 You can trigger a build on demand with optional inputs:
 
-- **Force build** — build even if no new NPM version is available
-- **CrowdSec version** — override the bouncer version for this build
+- **Force build** — build even if NPM and the bouncer are unchanged (uses a unique `latest-force-<date>-<run>` tag)
+- **CrowdSec version** — pin the bouncer version for this single run (empty = newest upstream release). The next scheduled run resumes tracking upstream, and pinning an older version does **not** move `:latest`.
 
 ## Troubleshooting
 

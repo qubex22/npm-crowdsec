@@ -1,22 +1,32 @@
 # =============================================================================
-# Weekly Nginx Proxy Manager Version Check & Image Build
+# Weekly NPM + CrowdSec Bouncer Version Check & Image Build
 # =============================================================================
 #
 # On schedule (weekly) and on manual dispatch:
-#   1. Checks the latest jc21/nginx-proxy-manager version on Docker Hub.
-#   2. Compares against the last-built version (.npm-version).
-#   3. If a newer version is available, builds and pushes a new image.
+#   1. Resolves the newest jc21/nginx-proxy-manager tag on Docker Hub.
+#   2. Resolves the newest crowdsecurity/cs-openresty-bouncer GitHub release.
+#   3. Compares BOTH against the last built versions (.npm-version).
+#   4. If either one moved, builds and pushes a new image, updates the tracker
+#      and cuts a GitHub release.
 #
-# Required secrets (set in repository Settings > Secrets and variables):
-#   DOCKER_USERNAME    — Registry username (e.g. qubex22 for GHCR)
-#   DOCKER_PASSWORD    — Registry password / access token
+# Before this change only NPM was tracked: the bouncer was hardcoded to 1.1.3,
+# so an NPM bump silently rebuilt the image with an old bouncer and reverted
+# any manual version pin on the next run.
 #
-# The image is pushed as:
-#   ghcr.io/qubex22/npm-crowdsec:<npm-version>-<bouncer-version>
+# Manual dispatch inputs (single run only):
+#   force_build       — build even when nothing changed
+#   crowdsec_version  — pin the bouncer for this build (empty = latest release)
+#
+# Required secrets (Settings > Secrets and variables > Actions):
+#   DOCKER_USERNAME    — GHCR username (e.g. qubex22)
+#   DOCKER_PASSWORD    — GHCR password / access token
+#
+# Images:
+#   ghcr.io/qubex22/npm-crowdsec:<npm-version>-cs<bouncer-version>
 #   ghcr.io/qubex22/npm-crowdsec:latest
 # =============================================================================
 
-name: NPM Version Check & Build
+name: NPM + CrowdSec Version Check & Build
 
 permissions:
   contents: write
@@ -33,17 +43,24 @@ on:
         type: boolean
         default: false
       crowdsec_version:
-        description: "Override CrowdSec bouncer version"
+        description: "Override CrowdSec bouncer version (empty = latest upstream release)"
         type: string
+        default: ""
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/npm-crowdsec
+  BOUNCER_REPO: crowdsecurity/cs-openresty-bouncer
+
+concurrency:
+  group: npm-crowdsec-build
+  cancel-in-progress: false
 
 jobs:
   check-and-build:
-    name: Check Version & Build
+    name: Check Versions & Build
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -54,63 +71,132 @@ jobs:
       # ------------------------------------------------------------------
       # Step 1: Determine if we need to build
       # ------------------------------------------------------------------
-      - name: Check for NPM version updates
+      - name: Check for NPM and CrowdSec bouncer updates
         id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          NPM_VERSION=""
-          BOUNCER_VERSION="${{ github.event.inputs.crowdsec_version || '1.1.3' }}"
-          FORCE="${{ github.event.inputs.force_build || 'false' }}"
+          set -euo pipefail
 
-          # Fetch latest NPM version from Docker Hub
-          RESPONSE=$(curl -s "https://hub.docker.com/v2/repositories/jc21/nginx-proxy-manager/tags/?page_size=100&ordering=last_updated")
+          FORCE="${{ inputs.force_build || 'false' }}"
+          BOUNCER_INPUT="${{ inputs.crowdsec_version || '' }}"
 
-          # Get the latest versioned tag (e.g. 2.15.1, not 'latest')
-          VERSION_TAG=$(echo "$RESPONSE" | jq -r '.results[] | select(.name | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) | .name' | sort -V | tail -1)
-
-          if [ -z "$VERSION_TAG" ]; then
-            echo "::warning::Could not parse version tag from Docker Hub. Falling back to 'latest'."
-            VERSION_TAG="latest"
-          fi
-
-          NPM_VERSION="$VERSION_TAG"
-          echo "Latest NPM version: $NPM_VERSION"
-
-          # Read the last built version (if exists)
+          # Read the last built versions (if the tracker exists)
           LAST_NPM=""
           LAST_BOUNCER=""
           if [ -f .npm-version ]; then
-            LAST_NPM=$(grep '^npm_version=' .npm-version | cut -d'=' -f2)
-            LAST_BOUNCER=$(grep '^bouncer_version=' .npm-version | cut -d'=' -f2)
-            echo "Last built: NPM=$LAST_NPM, CrowdSec=$LAST_BOUNCER"
+            LAST_NPM=$(sed -n 's/^npm_version=//p' .npm-version | head -1)
+            LAST_BOUNCER=$(sed -n 's/^bouncer_version=//p' .npm-version | head -1)
+            echo "Last built: NPM=${LAST_NPM:-?}, CrowdSec=${LAST_BOUNCER:-?}"
           else
             echo "No .npm-version file found — first build."
           fi
 
-          # Determine if we should build
-          SHOULD_BUILD="false"
-          TAG="latest"
+          # ---- Latest NPM tag on Docker Hub
+          NPM_JSON=$(curl -fsSL "https://hub.docker.com/v2/repositories/jc21/nginx-proxy-manager/tags/?page_size=100&ordering=last_updated" || true)
+          NPM_VERSION=$(printf '%s' "${NPM_JSON}" | jq -r '.results[] | select(.name | test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) | .name' 2>/dev/null \
+            | sort -V | tail -1 || true)
+          if [ -z "${NPM_VERSION}" ]; then
+            NPM_VERSION="${LAST_NPM:-latest}"
+            echo "::warning::Could not resolve the latest NPM tag on Docker Hub — reusing ${NPM_VERSION}."
+          fi
+          echo "Latest NPM version: ${NPM_VERSION}"
 
-          if [ "$FORCE" = "true" ]; then
-            SHOULD_BUILD="true"
-            TAG="latest-force-$(date +%Y%m%d)"
-            echo "Force build requested."
-          elif [ -z "$LAST_NPM" ] || [ "$NPM_VERSION" != "$LAST_NPM" ]; then
-            SHOULD_BUILD="true"
-            TAG="${NPM_VERSION}-cs${BOUNCER_VERSION}"
-            echo "NPM version changed: $LAST_NPM -> $NPM_VERSION"
-          elif [ -n "$LAST_BOUNCER" ] && [ "$BOUNCER_VERSION" != "$LAST_BOUNCER" ]; then
-            SHOULD_BUILD="true"
-            TAG="${NPM_VERSION}-cs${BOUNCER_VERSION}"
-            echo "CrowdSec version changed: $LAST_BOUNCER -> $BOUNCER_VERSION"
+          # ---- Latest upstream bouncer release (releases/latest excludes pre-releases)
+          if [ -n "${GH_TOKEN:-}" ]; then
+            BOUNCER_JSON=$(curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${BOUNCER_REPO}/releases/latest" || true)
           else
-            echo "No new version available. Skipping build."
+            BOUNCER_JSON=$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${BOUNCER_REPO}/releases/latest" || true)
+          fi
+          UPSTREAM_BOUNCER=$(printf '%s' "${BOUNCER_JSON}" \
+            | jq -r 'select(.assets | map(.name) | index("crowdsec-openresty-bouncer.tgz")) | .tag_name // empty' 2>/dev/null \
+            | sed 's/^v//' || true)
+
+          DOCKERFILE_BOUNCER=$(sed -n 's/^ARG CROWDSEC_OPENRESTY_BOUNCER_VERSION=//p' Dockerfile | head -1)
+          if [ -z "${UPSTREAM_BOUNCER}" ]; then
+            # Fall back to the last built version, then to the Dockerfile default.
+            UPSTREAM_BOUNCER="${LAST_BOUNCER:-${DOCKERFILE_BOUNCER}}"
+            echo "::warning::Could not resolve the latest CrowdSec bouncer release — assuming ${UPSTREAM_BOUNCER}."
+          fi
+          echo "Latest CrowdSec bouncer release: ${UPSTREAM_BOUNCER}"
+
+          if [ -n "${BOUNCER_INPUT}" ]; then
+            BOUNCER_VERSION="${BOUNCER_INPUT#v}"
+            echo "CrowdSec bouncer pinned by manual dispatch: ${BOUNCER_VERSION}"
+          else
+            BOUNCER_VERSION="${UPSTREAM_BOUNCER}"
           fi
 
-          # Write outputs
-          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
-          echo "npm_version=$NPM_VERSION" >> "$GITHUB_OUTPUT"
-          echo "bouncer_version=$BOUNCER_VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # Only a build that installs the upstream release may move :latest,
+          # so pinning an older bouncer can never roll the floating tag back.
+          if [ "${BOUNCER_VERSION}" = "${UPSTREAM_BOUNCER}" ]; then
+            PUSH_LATEST="true"
+          else
+            PUSH_LATEST="false"
+            echo "::notice::Pinned ${BOUNCER_VERSION} differs from upstream ${UPSTREAM_BOUNCER} — :latest will not be updated."
+          fi
+
+          # ---- Decide
+          SHOULD_BUILD="false"
+          TAG="latest"
+          if [ "${FORCE}" = "true" ]; then
+            SHOULD_BUILD="true"
+            TAG="latest-force-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+            echo "Force build requested."
+          elif [ -z "${LAST_NPM}" ] || [ "${NPM_VERSION}" != "${LAST_NPM}" ]; then
+            SHOULD_BUILD="true"
+            TAG="${NPM_VERSION}-cs${BOUNCER_VERSION}"
+            echo "NPM version changed: ${LAST_NPM:-none} -> ${NPM_VERSION}"
+          elif [ "${BOUNCER_VERSION}" != "${LAST_BOUNCER}" ]; then
+            SHOULD_BUILD="true"
+            TAG="${NPM_VERSION}-cs${BOUNCER_VERSION}"
+            echo "CrowdSec bouncer changed: ${LAST_BOUNCER:-none} -> ${BOUNCER_VERSION}"
+          else
+            echo "Already up to date (NPM ${NPM_VERSION}, CrowdSec ${BOUNCER_VERSION}). Skipping build."
+          fi
+
+          {
+            echo "should_build=$SHOULD_BUILD"
+            echo "npm_version=$NPM_VERSION"
+            echo "bouncer_version=$BOUNCER_VERSION"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          # Image tags: floating :latest (upstream installs only), the versioned
+          # combo, plus the unique force tag when a rebuild was forced.
+          {
+            echo "tags<<TAGS_EOF"
+            if [ "${PUSH_LATEST}" = "true" ]; then
+              echo "${REGISTRY}/${IMAGE_NAME}:latest"
+            fi
+            echo "${REGISTRY}/${IMAGE_NAME}:${NPM_VERSION}-cs${BOUNCER_VERSION}"
+            if [ "${FORCE}" = "true" ]; then
+              echo "${REGISTRY}/${IMAGE_NAME}:${TAG}"
+            fi
+            echo "TAGS_EOF"
+            echo "push_latest=${PUSH_LATEST}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Version check"
+            echo ""
+            echo "| Component | Detected | Last built |"
+            echo "|---|---|---|"
+            echo "| Nginx Proxy Manager | \`${NPM_VERSION}\` | \`${LAST_NPM:-—}\` |"
+            echo "| CrowdSec bouncer (upstream) | \`${UPSTREAM_BOUNCER}\` | \`${LAST_BOUNCER:-—}\` |"
+            echo "| CrowdSec bouncer (building) | \`${BOUNCER_VERSION}\` | |"
+            echo ""
+            echo "**Build:** ${SHOULD_BUILD} (\`${TAG}\`)"
+            if [ "${PUSH_LATEST}" = "false" ]; then
+              echo ""
+              echo "> Pinned bouncer \`${BOUNCER_VERSION}\` differs from upstream \`${UPSTREAM_BOUNCER}\`: \`:latest\` is left untouched."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # ------------------------------------------------------------------
       # Step 2: Set up Docker Buildx (only if building)
@@ -120,7 +206,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # ------------------------------------------------------------------
-      # Step 3: Log in to Docker Registry (only if building)
+      # Step 3: Log in to GHCR (only if building)
       # ------------------------------------------------------------------
       - name: Log in to GHCR
         if: steps.check.outputs.should_build == 'true'
@@ -131,21 +217,7 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       # ------------------------------------------------------------------
-      # Step 4: Extract metadata (only if building)
-      # ------------------------------------------------------------------
-      - name: Extract Docker metadata
-        if: steps.check.outputs.should_build == 'true'
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.check.outputs.tag }}
-            type=raw,value=latest
-            type=raw,value=${{ steps.check.outputs.npm_version }}-cs${{ steps.check.outputs.bouncer_version }}
-
-      # ------------------------------------------------------------------
-      # Step 5: Build and push (only if building)
+      # Step 4: Build and push (only if building)
       # ------------------------------------------------------------------
       - name: Build and push image
         if: steps.check.outputs.should_build == 'true'
@@ -153,15 +225,19 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.check.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.check.outputs.npm_version }}-cs${{ steps.check.outputs.bouncer_version }}
           build-args: |
+            NPM_VERSION=${{ steps.check.outputs.npm_version }}
             CROWDSEC_OPENRESTY_BOUNCER_VERSION=${{ steps.check.outputs.bouncer_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       # ------------------------------------------------------------------
-      # Step 6: Update version tracker (only if built successfully)
+      # Step 5: Update version tracker (only if built successfully)
       # ------------------------------------------------------------------
       - name: Update version tracker
         if: steps.check.outputs.should_build == 'true'
@@ -172,9 +248,10 @@ jobs:
           built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           commit=${{ github.sha }}
           EOF
+          cat .npm-version
 
       # ------------------------------------------------------------------
-      # Step 7: Commit version update (only if built successfully)
+      # Step 6: Commit version update (only if built successfully)
       # ------------------------------------------------------------------
       - name: Commit version update
         if: steps.check.outputs.should_build == 'true'
@@ -185,7 +262,7 @@ jobs:
           branch: main
 
       # ------------------------------------------------------------------
-      # Step 8: Create GitHub Release (only if built successfully)
+      # Step 7: Create GitHub Release (only if built successfully)
       # ------------------------------------------------------------------
       - name: Create GitHub Release
         if: steps.check.outputs.should_build == 'true'
@@ -194,7 +271,7 @@ jobs:
           tag_name: ${{ steps.check.outputs.tag }}
           name: "npm-crowdsec ${{ steps.check.outputs.npm_version }} (CrowdSec ${{ steps.check.outputs.bouncer_version }})"
           body: |
-            Automatic build triggered by upstream NPM version update.
+            Automatic build triggered by an upstream version update.
 
             | Component | Version |
             |---|---|
@@ -207,6 +284,8 @@ jobs:
             ```
             docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.check.outputs.tag }}
             ```
+
+            `:latest` only moves for builds that install the current upstream bouncer release.
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
